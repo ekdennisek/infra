@@ -49,9 +49,9 @@ locals {
 resource "proxmox_download_file" "ubuntu" {
   node_name    = var.pve_node
   datastore_id = "local"
-  content_type = "iso"          # bpg accepts .img here; it lands as a .img on the iso store
+  content_type = "import"          # bpg accepts .img here; it lands as a .img on the iso store
   url          = local.image_url
-  file_name    = "ubuntu-${local.ubuntu_release}-cloudimg-amd64.img"
+  file_name    = "ubuntu-${local.ubuntu_release}-cloudimg-amd64.qcow2"
 
   checksum           = local.image_checksum
   checksum_algorithm = "sha256"
