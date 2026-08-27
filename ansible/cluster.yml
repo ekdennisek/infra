@@ -1,0 +1,116 @@
+---
+# Bootstraps the kubeadm cluster on the Terraform-provisioned nodes.
+# Safe to re-run: init/join are guarded by `creates:`, so existing nodes
+# are untouched and a rebuilt node simply (re-)joins.
+#
+#   ansible-playbook cluster.yml
+
+- name: Wait for provisioning to finish
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 600
+
+    # Terraform returns as soon as the qemu agent is up, which is before
+    # the vendor-data has finished installing kubeadm. Exit code 2 means
+    # "done, with recoverable errors" (typically a transient apt hiccup).
+    - name: Wait for cloud-init to complete
+      ansible.builtin.command: cloud-init status --wait
+      register: cloud_init
+      changed_when: false
+      failed_when: cloud_init.rc not in [0, 2]
+
+- name: Initialise control plane
+  hosts: control_plane
+  become: true
+  vars:
+    # Points at the first CP node for now; swap in a VIP/DNS name if you
+    # ever go HA. Set from day one so adding CP nodes later is possible.
+    control_plane_endpoint: "{{ hostvars[groups['control_plane'][0]].ansible_host }}:6443"
+    # Passed both to kubeadm and to Calico's IP pool below. Must not
+    # overlap the node network (10.130.0.0/16).
+    pod_network_cidr: 10.250.0.0/16
+    calico_version: v3.30.3
+  tasks:
+    - name: Run kubeadm init
+      ansible.builtin.command: >
+        kubeadm init
+        --control-plane-endpoint={{ control_plane_endpoint }}
+        --pod-network-cidr={{ pod_network_cidr }}
+      args:
+        creates: /etc/kubernetes/admin.conf
+
+    # Since Calico v3.29 the operator CRDs ship separately from the
+    # operator itself and must be applied first. The CRDs are too large
+    # for client-side apply's last-applied annotation, so --server-side
+    # is required (and makes re-runs safe, unlike kubectl create).
+    - name: Install Calico operator CRDs
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf apply --server-side -f
+        https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/operator-crds.yaml
+
+    - name: Install Tigera operator (Calico)
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf apply --server-side -f
+        https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/tigera-operator.yaml
+
+    # CRD registration is asynchronous; applying the Installation before
+    # the CRDs are Established fails with "no matches for kind".
+    - name: Wait for Calico CRDs to be established
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf wait
+        --for=condition=Established --timeout=90s
+        crd/installations.operator.tigera.io crd/apiservers.operator.tigera.io
+      changed_when: false
+
+    - name: Write Calico installation manifest
+      ansible.builtin.copy:
+        dest: /root/calico-installation.yaml
+        content: |
+          apiVersion: operator.tigera.io/v1
+          kind: Installation
+          metadata:
+            name: default
+          spec:
+            calicoNetwork:
+              ipPools:
+                - name: default-ipv4-ippool
+                  blockSize: 26
+                  cidr: {{ pod_network_cidr }}
+                  encapsulation: VXLANCrossSubnet
+                  natOutgoing: Enabled
+                  nodeSelector: all()
+          ---
+          apiVersion: operator.tigera.io/v1
+          kind: APIServer
+          metadata:
+            name: default
+          spec: {}
+
+    - name: Apply Calico installation
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf apply --server-side -f
+        /root/calico-installation.yaml
+
+    - name: Generate worker join command
+      ansible.builtin.command: kubeadm token create --print-join-command
+      register: join_cmd
+      changed_when: false
+
+    - name: Fetch kubeconfig
+      ansible.builtin.fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ playbook_dir }}/kubeconfig"
+        flat: true
+
+- name: Join workers
+  hosts: workers
+  become: true
+  tasks:
+    - name: Join cluster
+      ansible.builtin.command: "{{ hostvars[groups['control_plane'][0]].join_cmd.stdout }}"
+      args:
+        creates: /etc/kubernetes/kubelet.conf

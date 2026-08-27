@@ -36,6 +36,15 @@ tofu plan      # shows what would happen; nothing is changed
 tofu apply     # does it, after you type "yes"
 ```
 
+Bring up the kubernetes cluster and verify that it's up and running
+
+```sh
+cd ansible && ansible-playbook cluster.yml
+# verify cluster is up and running
+export KUBECONFIG=$PWD/kubeconfig
+kubectl get nodes
+```
+
 ## Tearing down
 
 Destroy the template and instances.

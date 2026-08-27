@@ -5,13 +5,17 @@ terraform {
       source  = "bpg/proxmox"
       version = "~> 0.111"
     }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.5"
+    }
   }
 }
 
 provider "proxmox" {
-  endpoint  = var.pve_endpoint       # e.g. https://pve.example.com:8006/
-  api_token = var.pve_api_token      # "terraform@pve!tf=xxxxxxxx-..."
-  insecure  = true                  # true if you use the self-signed cert
+  endpoint  = var.pve_endpoint  # e.g. https://pve.example.com:8006/
+  api_token = var.pve_api_token # "terraform@pve!tf=xxxxxxxx-..."
+  insecure  = true              # true if you use the self-signed cert
 
   # SSH is only needed for a few operations (e.g. uploading snippets on
   # some storage types). Harmless to leave configured.
@@ -21,17 +25,17 @@ provider "proxmox" {
   }
 }
 
-variable "pve_endpoint"  {
+variable "pve_endpoint" {
   type = string
 }
 
 variable "pve_api_token" {
-  type = string
+  type      = string
   sensitive = true
 }
 
-variable "pve_node"      {
-  type = string
+variable "pve_node" {
+  type    = string
   default = "pve"
 }
 
@@ -49,7 +53,7 @@ locals {
 resource "proxmox_download_file" "ubuntu" {
   node_name    = var.pve_node
   datastore_id = "local"
-  content_type = "import"          # bpg accepts .img here; it lands as a .img on the iso store
+  content_type = "import" # bpg accepts .img here; it lands as a .img on the iso store
   url          = local.image_url
   file_name    = "ubuntu-${local.ubuntu_release}-cloudimg-amd64.qcow2"
 
@@ -64,7 +68,7 @@ resource "proxmox_download_file" "ubuntu" {
 #    pass on top of this template instead.)
 resource "proxmox_virtual_environment_file" "k8s_vendor_data" {
   node_name    = var.pve_node
-  datastore_id = "local"        # must have "Snippets" enabled in Datacenter > Storage
+  datastore_id = "local" # must have "Snippets" enabled in Datacenter > Storage
   content_type = "snippets"
 
   source_raw {
@@ -79,6 +83,8 @@ resource "proxmox_virtual_environment_file" "k8s_vendor_data" {
         - curl
         - gpg
         - containerd
+        - conntrack
+        - socat
       write_files:
         - path: /etc/modules-load.d/k8s.conf
           content: |
@@ -117,7 +123,7 @@ resource "proxmox_virtual_environment_vm" "k8s_template" {
   started  = false
 
   machine = "q35"
-  bios    = "ovmf"              # drop to "seabios" and remove efi_disk if you prefer
+  bios    = "ovmf" # drop to "seabios" and remove efi_disk if you prefer
 
   efi_disk {
     datastore_id = "local-zfs"
@@ -130,7 +136,7 @@ resource "proxmox_virtual_environment_vm" "k8s_template" {
 
   cpu {
     cores = 2
-    type  = "x86-64-v2-AES"     # "host" is faster but breaks live migration across dissimilar CPUs
+    type  = "x86-64-v2-AES" # "host" is faster but breaks live migration across dissimilar CPUs
   }
 
   memory {
@@ -143,7 +149,7 @@ resource "proxmox_virtual_environment_vm" "k8s_template" {
     interface    = "scsi0"
     iothread     = true
     discard      = "on"
-    size         = 20            # GB; larger than the image so growpart expands it on first boot
+    size         = 20 # GB; larger than the image so growpart expands it on first boot
   }
 
   scsi_hardware = "virtio-scsi-single"
@@ -153,7 +159,7 @@ resource "proxmox_virtual_environment_vm" "k8s_template" {
     model  = "virtio"
   }
 
-  serial_device {}               # cloud images expect a serial console
+  serial_device {} # cloud images expect a serial console
   vga {
     type = "serial0"
   }
