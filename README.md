@@ -23,11 +23,12 @@ Specify credentials in `terraform.tfvars`:
 ```sh
 pve_endpoint = "https://pve.example.com:8006/"
 pve_api_token = "terraform@pve!tf=xxxxxxxx-..."
+ssh_public_key = "..."
 ```
 
 ## Deploying
 
-Create the template.
+Create the template and instances.
 
 ```sh
 tofu init      # downloads the bpg provider into .terraform/
@@ -37,7 +38,7 @@ tofu apply     # does it, after you type "yes"
 
 ## Tearing down
 
-Destroy the template.
+Destroy the template and instances.
 
 ```sh
 tofu destroy
