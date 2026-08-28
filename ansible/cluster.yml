@@ -115,17 +115,32 @@
       args:
         creates: /etc/kubernetes/kubelet.conf
 
+# mount.nfs lives in nfs-common, which the cloud image doesn't ship;
+# without it every NFS PVC mount fails on the node.
+- name: Node prerequisites for NFS volumes
+  hosts: all
+  become: true
+  tasks:
+    - name: Install nfs-common
+      ansible.builtin.apt:
+        name: nfs-common
+        state: present
+
 - name: Install cluster add-ons
   hosts: control_plane
   become: true
   vars:
     metallb_version: v0.16.0
     # Reserved on the LAN for LoadBalancer services — keep out of DHCP scope.
-    metallb_pool: 10.130.0.7-10.130.0.9
+    metallb_pool: 10.130.0.35-10.130.0.39
     helm_version: v3.19.4
     traefik_chart_version: 41.4.0 # Traefik v3.7.12
     argocd_chart_version: 10.4.1 # Argo CD v3.5.2
     argocd_host: argocd.lab.local
+    csi_nfs_chart_version: 4.13.4
+    # The durable NFS VM from the storage/ Terraform root.
+    nfs_server: 10.130.0.40
+    nfs_share: /export/k8s
     # Argo CD syncs the k8s/ directory of this repo; the repo must be
     # reachable from the cluster (public, or add a repo credential secret).
     gitops_repo: https://github.com/ekdennisek/infra.git
@@ -300,6 +315,54 @@
     - name: How to log in to Argo CD
       ansible.builtin.debug:
         msg: >-
-          Argo CD is at http://{{ argocd_host }}/ now. 
+          Argo CD is at http://{{ argocd_host }}/ now.
           Log in as admin / {{ argocd_pw.stdout | b64decode }}
           and change the password.
+
+    # Storage: PVCs backed by the durable NFS VM (storage/ Terraform root).
+    - name: Add csi-driver-nfs chart repo
+      ansible.builtin.command: >
+        helm repo add csi-driver-nfs
+        https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts
+        --force-update
+      changed_when: false
+
+    - name: Update csi-driver-nfs chart repo
+      ansible.builtin.command: helm repo update csi-driver-nfs
+      changed_when: false
+
+    - name: Install csi-driver-nfs
+      ansible.builtin.command: >
+        helm upgrade --install csi-driver-nfs csi-driver-nfs/csi-driver-nfs
+        --kubeconfig /etc/kubernetes/admin.conf
+        --namespace kube-system
+        --version {{ csi_nfs_chart_version }}
+
+    # Every PVC gets its own subdirectory under the export. onDelete:
+    # archive renames a deleted PVC's directory instead of removing it,
+    # so data outlives accidental PVC deletion (e.g. an Argo CD prune).
+    - name: Write NFS StorageClass manifest
+      ansible.builtin.copy:
+        dest: /root/nfs-storageclass.yaml
+        content: |
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: nfs
+            annotations:
+              storageclass.kubernetes.io/is-default-class: "true"
+          provisioner: nfs.csi.k8s.io
+          parameters:
+            server: {{ nfs_server }}
+            share: {{ nfs_share }}
+            onDelete: archive
+          reclaimPolicy: Delete
+          volumeBindingMode: Immediate
+          mountOptions:
+            - nfsvers=4.1
+            - hard
+
+    - name: Apply NFS StorageClass
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf apply --server-side -f
+        /root/nfs-storageclass.yaml
