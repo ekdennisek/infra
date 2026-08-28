@@ -124,6 +124,11 @@
     metallb_pool: 10.130.0.7-10.130.0.9
     helm_version: v3.19.4
     traefik_chart_version: 41.4.0 # Traefik v3.7.12
+    argocd_chart_version: 10.4.1 # Argo CD v3.5.2
+    argocd_host: argocd.lab.local
+    # Argo CD syncs the k8s/ directory of this repo; the repo must be
+    # reachable from the cluster (public, or add a repo credential secret).
+    gitops_repo: https://github.com/ekdennisek/infra.git
   tasks:
     - name: Install MetalLB
       ansible.builtin.command: >
@@ -212,3 +217,89 @@
         --namespace traefik --create-namespace
         --version {{ traefik_chart_version }}
         -f /root/traefik-values.yaml
+
+    - name: Add Argo chart repo
+      ansible.builtin.command: helm repo add argo https://argoproj.github.io/argo-helm --force-update
+      changed_when: false
+
+    - name: Update Argo chart repo
+      ansible.builtin.command: helm repo update argo
+      changed_when: false
+
+    - name: Write Argo CD values
+      ansible.builtin.copy:
+        dest: /root/argocd-values.yaml
+        content: |
+          global:
+            domain: {{ argocd_host }}
+          configs:
+            params:
+              # Argo CD terminates its own TLS by default; behind Traefik's
+              # plain-HTTP entrypoint that causes a redirect loop. Serve
+              # plain HTTP and let Traefik front it.
+              server.insecure: true
+          server:
+            ingress:
+              enabled: true
+              ingressClassName: traefik
+
+    - name: Install Argo CD
+      ansible.builtin.command: >
+        helm upgrade --install argocd argo/argo-cd
+        --kubeconfig /etc/kubernetes/admin.conf
+        --namespace argocd --create-namespace
+        --version {{ argocd_chart_version }}
+        -f /root/argocd-values.yaml
+
+    - name: Wait for Argo CD server
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf wait
+        -n argocd --for=condition=Available --timeout=300s
+        deploy/argocd-server
+      changed_when: false
+
+    # The root Application: Argo CD continuously syncs everything under
+    # k8s/ in the repo to the cluster. Deploying an app = pushing to git.
+    - name: Write root Application manifest
+      ansible.builtin.copy:
+        dest: /root/argocd-apps.yaml
+        content: |
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: apps
+            namespace: argocd
+          spec:
+            project: default
+            source:
+              repoURL: {{ gitops_repo }}
+              targetRevision: HEAD
+              path: k8s
+              directory:
+                recurse: true
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: default
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true
+
+    - name: Apply root Application
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf apply --server-side -f
+        /root/argocd-apps.yaml
+
+    - name: Read initial admin password
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf get secret
+        -n argocd argocd-initial-admin-secret -o jsonpath={.data.password}
+      register: argocd_pw
+      changed_when: false
+
+    - name: How to log in to Argo CD
+      ansible.builtin.debug:
+        msg: >-
+          Argo CD is at http://{{ argocd_host }}/ now. 
+          Log in as admin / {{ argocd_pw.stdout | b64decode }}
+          and change the password.
