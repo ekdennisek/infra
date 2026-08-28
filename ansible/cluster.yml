@@ -114,3 +114,101 @@
       ansible.builtin.command: "{{ hostvars[groups['control_plane'][0]].join_cmd.stdout }}"
       args:
         creates: /etc/kubernetes/kubelet.conf
+
+- name: Install cluster add-ons
+  hosts: control_plane
+  become: true
+  vars:
+    metallb_version: v0.16.0
+    # Reserved on the LAN for LoadBalancer services — keep out of DHCP scope.
+    metallb_pool: 10.130.0.7-10.130.0.9
+    helm_version: v3.19.4
+    traefik_chart_version: 41.4.0 # Traefik v3.7.12
+  tasks:
+    - name: Install MetalLB
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf apply --server-side -f
+        https://raw.githubusercontent.com/metallb/metallb/{{ metallb_version }}/config/manifests/metallb-native.yaml
+
+    # The IPAddressPool/L2Advertisement CRs are validated by a webhook served
+    # by this controller; applying them before it's up fails with
+    # connection refused.
+    - name: Wait for MetalLB controller
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf wait
+        -n metallb-system --for=condition=Available --timeout=180s
+        deploy/controller
+      changed_when: false
+
+    - name: Write MetalLB address pool manifest
+      ansible.builtin.copy:
+        dest: /root/metallb-pool.yaml
+        content: |
+          apiVersion: metallb.io/v1beta1
+          kind: IPAddressPool
+          metadata:
+            name: default-pool
+            namespace: metallb-system
+          spec:
+            addresses:
+              - {{ metallb_pool }}
+          ---
+          apiVersion: metallb.io/v1beta1
+          kind: L2Advertisement
+          metadata:
+            name: default
+            namespace: metallb-system
+          spec:
+            ipAddressPools:
+              - default-pool
+
+    # Retries because the webhook's endpoints can lag a moment behind the
+    # deployment turning Available.
+    - name: Apply MetalLB address pool
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf apply --server-side -f
+        /root/metallb-pool.yaml
+      register: pool_apply
+      until: pool_apply.rc == 0
+      retries: 6
+      delay: 5
+
+    # Traefik is helm-only upstream, so put helm on the control plane.
+    - name: Download helm
+      ansible.builtin.get_url:
+        url: https://get.helm.sh/helm-{{ helm_version }}-linux-amd64.tar.gz
+        dest: /root/helm-{{ helm_version }}.tar.gz
+        mode: "0644"
+
+    - name: Unpack helm
+      ansible.builtin.unarchive:
+        src: /root/helm-{{ helm_version }}.tar.gz
+        dest: /usr/local/bin
+        remote_src: true
+        extra_opts: ["--strip-components=1", "linux-amd64/helm"]
+        creates: /usr/local/bin/helm
+
+    - name: Add Traefik chart repo
+      ansible.builtin.command: helm repo add traefik https://traefik.github.io/charts --force-update
+      changed_when: false
+
+    - name: Update chart repo
+      ansible.builtin.command: helm repo update traefik
+      changed_when: false
+
+    - name: Write Traefik values
+      ansible.builtin.copy:
+        dest: /root/traefik-values.yaml
+        content: |
+          service:
+            type: LoadBalancer  # IP comes from the MetalLB pool
+
+    # upgrade --install is idempotent; helm bumps the release revision on
+    # every run, which is cosmetic.
+    - name: Install Traefik
+      ansible.builtin.command: >
+        helm upgrade --install traefik traefik/traefik
+        --kubeconfig /etc/kubernetes/admin.conf
+        --namespace traefik --create-namespace
+        --version {{ traefik_chart_version }}
+        -f /root/traefik-values.yaml
