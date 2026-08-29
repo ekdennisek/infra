@@ -10,9 +10,9 @@ locals {
 
   # Role → per-host settings. Adding a node = adding a line here.
   nodes = {
-    "k8s-cp-1" = { role = "control", ip = "10.130.0.2", vm_id = 3010, cores = 2, memory = 4096 }
-    "k8s-w-1"  = { role = "worker", ip = "10.130.0.3", vm_id = 3011, cores = 4, memory = 8192 }
-    "k8s-w-2"  = { role = "worker", ip = "10.130.0.4", vm_id = 3012, cores = 4, memory = 8192 }
+    "k8s-cp-1" = { role = "control", ip = "10.130.0.30", vm_id = 3020, cores = 2, memory = 4096 }
+    "k8s-w-1"  = { role = "worker", ip = "10.130.0.40", vm_id = 3021, cores = 4, memory = 8192 }
+    "k8s-w-2"  = { role = "worker", ip = "10.130.0.41", vm_id = 3022, cores = 4, memory = 8192 }
   }
 }
 
