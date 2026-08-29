@@ -2,3 +2,5 @@
 inventory.ini
 # Fetched cluster credentials
 kubeconfig
+# Decrypts every sealed secret
+sealed-secrets-key.yaml

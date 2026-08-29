@@ -45,6 +45,26 @@ export KUBECONFIG=$PWD/kubeconfig
 kubectl get nodes
 ```
 
+## Secrets
+
+Secrets are managed with [sealed-secrets](https://github.com/bitnami/sealed-secrets):
+encrypted with the cluster's public key, so the sealed files are safe to
+commit to this (public) repo. Argo CD applies them like any other manifest
+and the in-cluster controller turns them into regular `Secret`s.
+
+One-time: install the `kubeseal` CLI. Then, to create a secret:
+
+```sh
+kubectl create secret generic myapp-db --from-literal=password=hunter2 \
+  --dry-run=client -o yaml | kubeseal --format yaml > k8s/myapp/db-sealed.yaml
+# commit + push — Argo CD deploys it
+```
+
+The playbook backs up the sealing key to `ansible/sealed-secrets-key.yaml`
+(gitignored — keep it safe). If that file exists when the playbook runs
+against a rebuilt cluster, the key is restored first, so already-committed
+sealed secrets remain decryptable.
+
 ## Tearing down
 
 Destroy the template and instances.

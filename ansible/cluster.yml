@@ -126,6 +126,7 @@
     traefik_chart_version: 41.4.0 # Traefik v3.7.12
     argocd_chart_version: 10.4.1 # Argo CD v3.5.2
     argocd_host: argocd.lab.local
+    sealed_secrets_chart_version: 2.19.3 # controller v0.39.1
     # Argo CD syncs the k8s/ directory of this repo; the repo must be
     # reachable from the cluster (public, or add a repo credential secret).
     gitops_repo: https://github.com/ekdennisek/infra.git
@@ -300,6 +301,76 @@
     - name: How to log in to Argo CD
       ansible.builtin.debug:
         msg: >-
-          Argo CD is at http://{{ argocd_host }}/ now. 
+          Argo CD is at http://{{ argocd_host }}/ now.
           Log in as admin / {{ argocd_pw.stdout | b64decode }}
           and change the password.
+
+    # Sealed Secrets: encrypted secrets that are safe to commit to the
+    # public repo; the controller decrypts them in-cluster.
+    - name: Check for a sealing key backup
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/sealed-secrets-key.yaml"
+      delegate_to: localhost
+      become: false
+      register: sealing_key_backup
+
+    # Restoring the key BEFORE the controller starts means SealedSecrets
+    # committed before a cluster rebuild stay decryptable.
+    - name: Restore sealing key from backup
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/sealed-secrets-key.yaml"
+        dest: /root/sealed-secrets-key.yaml
+        mode: "0600"
+      when: sealing_key_backup.stat.exists
+
+    - name: Apply restored sealing key
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf apply -f
+        /root/sealed-secrets-key.yaml
+      when: sealing_key_backup.stat.exists
+
+    - name: Add sealed-secrets chart repo
+      ansible.builtin.command: >
+        helm repo add sealed-secrets https://bitnami.github.io/sealed-secrets
+        --force-update
+      changed_when: false
+
+    - name: Update sealed-secrets chart repo
+      ansible.builtin.command: helm repo update sealed-secrets
+      changed_when: false
+
+    # fullnameOverride matters: kubeseal's defaults look for a controller
+    # named sealed-secrets-controller in kube-system; without it every
+    # kubeseal invocation needs --controller-name/--controller-namespace.
+    - name: Install sealed-secrets controller
+      ansible.builtin.command: >
+        helm upgrade --install sealed-secrets sealed-secrets/sealed-secrets
+        --kubeconfig /etc/kubernetes/admin.conf
+        --namespace kube-system
+        --version {{ sealed_secrets_chart_version }}
+        --set fullnameOverride=sealed-secrets-controller
+
+    - name: Wait for sealed-secrets controller
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf wait
+        -n kube-system --for=condition=Available --timeout=180s
+        deploy/sealed-secrets-controller
+      changed_when: false
+
+    - name: Read sealing key
+      ansible.builtin.command: >
+        kubectl --kubeconfig /etc/kubernetes/admin.conf get secret
+        -n kube-system -l sealedsecrets.bitnami.com/sealed-secrets-key
+        -o yaml
+      register: sealing_key
+      changed_when: false
+
+    # The key decrypts every sealed secret — the backup lands next to the
+    # kubeconfig, is gitignored, and must be kept safe.
+    - name: Back up sealing key
+      ansible.builtin.copy:
+        content: "{{ sealing_key.stdout }}"
+        dest: "{{ playbook_dir }}/sealed-secrets-key.yaml"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
