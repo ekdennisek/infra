@@ -1,17 +1,5 @@
 # Infrastructure
 
-Proxmox + OpenTofu + Ansible homelab running a kubeadm Kubernetes cluster
-(Calico CNI) with MetalLB, Traefik, Argo CD and NFS-backed storage.
-
-| What           | Where                         |
-| -------------- | ----------------------------- |
-| k8s nodes      | 10.130.0.30-32 (VM 3010-3012) |
-| MetalLB pool   | 10.130.0.35-39                |
-| NFS storage VM | 10.130.0.40 (VM 3020)         |
-
-Argo CD deploys everything under `k8s/` in this repo automatically —
-pushing to master is deploying.
-
 ## Setup
 
 Perform the following steps on the Proxmox machine.
@@ -40,14 +28,6 @@ ssh_public_key = "..."
 
 ## Deploying
 
-Create the durable NFS storage VM.
-
-```sh
-cd storage
-ln -s ../terraform.tfvars .
-tofu init && tofu apply
-```
-
 Create the template and instances.
 
 ```sh
@@ -67,9 +47,7 @@ kubectl get nodes
 
 ## Tearing down
 
-Destroy the template and instances. The storage VM survives, data in
-PVCs (and the archived directories of deleted PVCs) is kept on its data
-disk.
+Destroy the template and instances.
 
 ```sh
 tofu destroy
