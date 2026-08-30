@@ -1,0 +1,13 @@
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: pokeshop-basic-auth
+  namespace: default
+spec:
+  encryptedData:
+    users: AgBzKSjzZ+mJktbEWSGGjNZijJwzAUqpnMBFcvJsm9t9LQFtkiYKWVKPHBWt681jLsb+1IvmSacweA27qbChjDs2Qf6G//PkqwS5NC4ULV6oQZOxfDitdmC8MXyt9AYcZil1udm6RLRdBmT3weCiG+Wee4iPTKRHntG+GIuQn0FjkXzKNIDsXlgwPWuLAUld//vXhaW3fUZx9gpPcCTh5JRL0Ah3cLgWyTsuyCzhYJvj+m4/99fW2whL0Wm0t3xnJO4hIjkeZSuopZhybPuraqOHJxESVTKft9x0gflw9iazi7NckQEmm2Ql1vuRJ98cn+DYvGjutEAKtdXHvKN4wyD6JrvMSaLXPty1mOJoIhS+aSb6SRfrKduM2PrUFZZDyURQinkHnB74btJ9fDvu645oQVlpP8reFpaFydhCeIzL+d/xbzCTkkSq5182H4neAQveUqhprDjx/lZHDJILe6/sgMb7T7/eJFU5uHvZbj6xgKeq3v6H5//dw2HlZh2gOQFo7tqpSwRnCIwYHFCU3TpHkc43JHv7mMUnc0ND7lD0PFEabqkWcihepgvxLSeeedDbajAofzf1J2ooI+motHWLdx5qjsSRVnLvTOmWmOhpx2LejBUgKXxY813yFttmtsgkCubsbZtN64n4pcsGoV4WIuYVD4o+YOBYwiz2OTHFLiG8Ac7QjWryRJkZOpkv3JJ7uUr1IeO4fmAsigChYRle49t7/02T7Hb2c6Eh2S+HwbLH7kuWh2SY/tTc18kHNNrqNJBRU53JJqVsbyn6G6erDVVrCIc=
+  template:
+    metadata:
+      name: pokeshop-basic-auth
+      namespace: default

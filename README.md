@@ -60,6 +60,22 @@ kubectl create secret generic myapp-db --from-literal=password=hunter2 \
 # commit + push — Argo CD deploys it
 ```
 
+or add more keys to an existing secret:
+
+```sh
+kubectl create secret generic myapp-db \
+  --from-literal=NEW_KEY=value \
+  --dry-run=client -o yaml | kubeseal --format yaml --merge-into k8s/myapp/db-sealed.yaml
+```
+
+or create a secret from a file:
+
+```sh
+kubectl create secret generic myapp-db \
+  --from-env-file=secrets.env \
+  --dry-run=client -o yaml | kubeseal --format yaml --merge-into k8s/myapp/db-sealed.yaml
+```
+
 The playbook backs up the sealing key to `ansible/sealed-secrets-key.yaml`
 (gitignored — keep it safe). If that file exists when the playbook runs
 against a rebuilt cluster, the key is restored first, so already-committed

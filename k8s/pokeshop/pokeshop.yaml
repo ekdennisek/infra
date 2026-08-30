@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pokeshop
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: pokeshop }
+  template:
+    metadata:
+      labels: { app: pokeshop }
+    spec:
+      imagePullSecrets:
+        - name: regcred
+      containers:
+        - name: pokeshop
+          image: registry.dennisek.se/pokeshop:4b400edaf8350807726b4f563238ff6e7584f0fb
+          ports: [{ containerPort: 3000 }]
+          envFrom:
+            - secretRef:
+                name: pokeshop
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pokeshop
+spec:
+  selector: { app: pokeshop }
+  ports: [{ port: 80, targetPort: 3000 }]
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: pokeshop-basic-auth
+spec:
+  basicAuth:
+    secret: pokeshop-basic-auth
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pokeshop
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: default-pokeshop-basic-auth@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: pokeshop.dennisek.se
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pokeshop
+                port: { number: 80 }
