@@ -14,7 +14,7 @@ spec:
         - name: regcred
       containers:
         - name: pokeshop
-          image: registry.dennisek.se/pokeshop:d288dda504e3174a5be81413b20f40e8fd41d3b2
+          image: registry.dennisek.se/pokeshop:a42a75dd06f50f736f4964d7b32598c4dfb243c0
           ports: [{ containerPort: 3000 }]
           envFrom:
             - secretRef:
