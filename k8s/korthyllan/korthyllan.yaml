@@ -14,7 +14,7 @@ spec:
         - name: regcred
       containers:
         - name: korthyllan
-          image: registry.dennisek.se/korthyllan:bdc5c932c9f32eb8d18d704abd2373b092746e8c
+          image: registry.dennisek.se/korthyllan:94881c00e0b10dac3e06ddb159aa5526b3fca47c
           ports: [{ containerPort: 3000 }]
           envFrom:
             - secretRef:
