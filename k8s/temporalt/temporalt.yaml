@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporalt
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: temporalt }
+  template:
+    metadata:
+      labels: { app: temporalt }
+    spec:
+      imagePullSecrets:
+        - name: regcred
+      containers:
+        - name: temporalt
+          image: registry.dennisek.se/temporalt:c88bd1eb94e1c9f987c0a89292fcca4fc2e79384
+          ports: [{ containerPort: 3000 }]
+          envFrom:
+            - secretRef:
+                name: temporalt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporalt
+spec:
+  selector: { app: temporalt }
+  ports: [{ port: 80, targetPort: 3000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: temporalt
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: temporalt.se
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: temporalt
+                port: { number: 80 }
