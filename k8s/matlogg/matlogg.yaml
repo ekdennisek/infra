@@ -14,7 +14,7 @@ spec:
         - name: regcred
       containers:
         - name: matlogg
-          image: registry.dennisek.se/matlogg:193513f921ea94fd3c9b19278503a152dfd3d88b
+          image: registry.dennisek.se/matlogg:d81d9e026ce1b14faab88f1383b999111c6885b3
           ports: [{ containerPort: 3000 }]
           envFrom:
             - secretRef:
