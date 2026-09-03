@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: matlogg
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: matlogg }
+  template:
+    metadata:
+      labels: { app: matlogg }
+    spec:
+      imagePullSecrets:
+        - name: regcred
+      containers:
+        - name: matlogg
+          image: registry.dennisek.se/matlogg:193513f921ea94fd3c9b19278503a152dfd3d88b
+          ports: [{ containerPort: 3000 }]
+          envFrom:
+            - secretRef:
+                name: matlogg
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: matlogg
+spec:
+  selector: { app: matlogg }
+  ports: [{ port: 80, targetPort: 3000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: matlogg
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: matlogg.dennisek.se
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: matlogg
+                port: { number: 80 }
