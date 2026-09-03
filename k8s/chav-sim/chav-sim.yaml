@@ -14,7 +14,7 @@ spec:
         - name: regcred
       containers:
         - name: chav-sim
-          image: registry.dennisek.se/chav-sim:48af0f794e86146d1a392e88b35a93b40fd19a49
+          image: registry.dennisek.se/chav-sim:bed8bcbca47dc2355ce4363a7a3243c3d71338c1
           ports: [{ containerPort: 3000 }]
           envFrom:
             - secretRef:
