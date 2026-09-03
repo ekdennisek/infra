@@ -55,25 +55,25 @@ and the in-cluster controller turns them into regular `Secret`s.
 One-time: install the `kubeseal` CLI. Then, to create a secret:
 
 ```sh
-kubectl create secret generic myapp-db --from-literal=password=hunter2 \
-  --dry-run=client -o yaml | kubeseal --format yaml > k8s/myapp/db-sealed.yaml
+kubectl create secret generic myapp --from-literal=password=hunter2 \
+  --dry-run=client -o yaml | kubeseal --format yaml > k8s/myapp/secrets-sealed.yaml
 # commit + push — Argo CD deploys it
 ```
 
 or add more keys to an existing secret:
 
 ```sh
-kubectl create secret generic myapp-db \
+kubectl create secret generic myapp \
   --from-literal=NEW_KEY=value \
-  --dry-run=client -o yaml | kubeseal --format yaml --merge-into k8s/myapp/db-sealed.yaml
+  --dry-run=client -o yaml | kubeseal --format yaml --merge-into k8s/myapp/secrets-sealed.yaml
 ```
 
 or create a secret from a file:
 
 ```sh
-kubectl create secret generic myapp-db \
+kubectl create secret generic myapp \
   --from-env-file=secrets.env \
-  --dry-run=client -o yaml | kubeseal --format yaml --merge-into k8s/myapp/db-sealed.yaml
+  --dry-run=client -o yaml | kubeseal --format yaml --merge-into k8s/myapp/secrets-sealed.yaml
 ```
 
 The playbook backs up the sealing key to `ansible/sealed-secrets-key.yaml`
