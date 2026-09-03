@@ -14,7 +14,7 @@ spec:
         - name: regcred
       containers:
         - name: homepage
-          image: registry.dennisek.se/homepage:2f66dbe6fb0490499edc7e4bf6fe63099d3a7395
+          image: registry.dennisek.se/homepage:35d28816aaed14ffb18d66ac59f3ac721df78b43
           ports: [{ containerPort: 80 }]
 ---
 apiVersion: v1
