@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chav-sim
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: chav-sim }
+  template:
+    metadata:
+      labels: { app: chav-sim }
+    spec:
+      imagePullSecrets:
+        - name: regcred
+      containers:
+        - name: chav-sim
+          image: registry.dennisek.se/chav-sim:48af0f794e86146d1a392e88b35a93b40fd19a49
+          ports: [{ containerPort: 3000 }]
+          envFrom:
+            - secretRef:
+                name: chav-sim
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chav-sim
+spec:
+  selector: { app: chav-sim }
+  ports: [{ port: 80, targetPort: 3000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: chav-sim
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: chav.dennisek.se
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: chav-sim
+                port: { number: 80 }
