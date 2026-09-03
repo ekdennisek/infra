@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: korthyllan
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: korthyllan }
+  template:
+    metadata:
+      labels: { app: korthyllan }
+    spec:
+      imagePullSecrets:
+        - name: regcred
+      containers:
+        - name: korthyllan
+          image: registry.dennisek.se/korthyllan:bdc5c932c9f32eb8d18d704abd2373b092746e8c
+          ports: [{ containerPort: 3000 }]
+          envFrom:
+            - secretRef:
+                name: korthyllan
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: korthyllan
+spec:
+  selector: { app: korthyllan }
+  ports: [{ port: 80, targetPort: 3000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: korthyllan
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: koba.dennisek.se
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: korthyllan
+                port: { number: 80 }
