@@ -14,7 +14,7 @@ spec:
         - name: regcred
       containers:
         - name: balansboken
-          image: registry.dennisek.se/balansboken:764c81036dcb6b9e72ecc8655f35b07b887c05b2
+          image: registry.dennisek.se/balansboken:7980fc2826cb26a99cc6134ee07982f9d861f426
           ports: [{ containerPort: 3000 }]
           envFrom:
             - secretRef:
