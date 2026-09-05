@@ -512,6 +512,10 @@
           DocumentServerInternalUrl: http://127.0.0.1:{{ eods_port }}/
           StorageUrl: http://{{ vm_ip }}/
           jwt_secret: "{{ eods_jwt_secret }}"
+          # No thumbnails via the document server: each one parks a PHP
+          # worker waiting on the server, which in turn needs a PHP worker
+          # to fetch the file. A folder of office files deadlocks the pool.
+          preview: "false"
 
     - name: Write connector settings
       ansible.builtin.command: >
