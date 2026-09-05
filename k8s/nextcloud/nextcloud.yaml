@@ -1,0 +1,83 @@
+# Nextcloud and the Euro-Office document server run on a VM outside the
+# cluster (nextcloud/main.tf, ansible/nextcloud.yml). These selector-less
+# Services with hand-written EndpointSlices let Traefik route the two public
+# hostnames to it — same trick as k8s/common/garage-web.yaml. TLS ends at
+# the proxy in front of Traefik; Nextcloud knows via overwriteprotocol.
+apiVersion: v1
+kind: Service
+metadata:
+  name: nextcloud
+spec:
+  ports: [{ name: http, port: 80, targetPort: 80 }]
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: nextcloud
+  labels:
+    kubernetes.io/service-name: nextcloud
+addressType: IPv4
+ports:
+  - { name: http, port: 80, protocol: TCP }
+endpoints:
+  - addresses: ["10.130.0.25"]
+    # Explicit so the manifest matches what the API server stores; without
+    # it Argo CD reports the slice permanently OutOfSync.
+    conditions: { ready: true }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nextcloud
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: nextcloud.dennisek.se
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nextcloud
+                port: { number: 80 }
+---
+# Euro-Office: the Docker container's port 80 is published on the VM's 8080.
+# Browsers of Nextcloud users talk to it directly, so it must be public;
+# JWT (shared with Nextcloud) is what keeps strangers from editing.
+apiVersion: v1
+kind: Service
+metadata:
+  name: eods
+spec:
+  ports: [{ name: http, port: 80, targetPort: 8080 }]
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: eods
+  labels:
+    kubernetes.io/service-name: eods
+addressType: IPv4
+ports:
+  - { name: http, port: 8080, protocol: TCP }
+endpoints:
+  - addresses: ["10.130.0.25"]
+    conditions: { ready: true }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: eods
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: eods.dennisek.se
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: eods
+                port: { number: 80 }

@@ -1,0 +1,543 @@
+---
+# Installs Nextcloud (from the upstream tarball, per the source-installation
+# manual) and the Euro-Office document server (Docker) on the VM created by
+# nextcloud/main.tf, and wires the two together. Nextcloud keeps its files in
+# Garage (S3 primary storage) and its database on the external PostgreSQL
+# server; this VM holds only code, config and caches.
+#
+#   ansible-playbook -i nextcloud-inventory.ini nextcloud.yml
+#
+# Secrets come from nextcloud-secrets.yml (gitignored; copy the .example).
+# Safe to re-run: every step is guarded, so a second run changes nothing.
+# It installs Nextcloud but does not upgrade it — see README.
+
+- name: Wait for provisioning to finish
+  hosts: nextcloud
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 600
+
+    - name: Wait for cloud-init to complete
+      ansible.builtin.command: cloud-init status --wait
+      register: cloud_init
+      changed_when: false
+      failed_when: cloud_init.rc not in [0, 2]
+
+- name: Install Nextcloud and Euro-Office
+  hosts: nextcloud
+  become: true
+  vars_files:
+    - nextcloud-secrets.yml
+  vars:
+    nextcloud_version: 34.0.3
+    nextcloud_tarball: https://download.nextcloud.com/server/releases/nextcloud-{{ nextcloud_version }}.tar.bz2
+    nextcloud_host: nextcloud.dennisek.se
+    eods_host: eods.dennisek.se
+    nextcloud_dir: /var/www/nextcloud
+    # Logs and a few bits of app data; user files go to S3.
+    nextcloud_data_dir: /var/lib/nextcloud/data
+    vm_ip: "{{ ansible_host }}"
+    # External PostgreSQL; database and user are created by hand (README).
+    db_host: 10.130.0.10
+    db_port: 5432
+    db_name: nextcloud
+    db_user: nextcloud
+    # Garage, plain HTTP on the LAN (README "Object storage").
+    s3_host: 10.130.0.20
+    s3_port: 3900
+    s3_bucket: nextcloud
+    s3_region: garage
+    # Pin to a release tag; bump and re-run to upgrade the document server.
+    eods_image: ghcr.io/euro-office/documentserver:v9.3.4-hotfix.1
+    eods_port: 8080 # host port; the container listens on 80
+    # Requests arrive via Traefik, whose pods egress with their node's IP
+    # (Calico natOutgoing). Trust the k8s nodes so X-Forwarded-For is used.
+    trusted_proxies: [10.130.0.30, 10.130.0.40, 10.130.0.41]
+    occ: sudo -u www-data php {{ nextcloud_dir }}/occ
+
+  handlers:
+    - name: Restart php-fpm
+      ansible.builtin.service:
+        name: php{{ php_version }}-fpm
+        state: restarted
+
+    - name: Reload apache
+      ansible.builtin.service:
+        name: apache2
+        state: reloaded
+
+    - name: Restart euro-office
+      ansible.builtin.systemd:
+        name: euro-office
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+    # --- packages ----------------------------------------------------------
+    # Unversioned php-* metapackages resolve to the distro default (8.5 on
+    # Ubuntu 26.04); the exact version is read back for the ini paths.
+    - name: Install packages
+      ansible.builtin.apt:
+        name:
+          - apache2
+          - php-fpm
+          - php-cli
+          - php-pgsql
+          - php-gd
+          - php-xml
+          - php-mbstring
+          - php-curl
+          - php-zip
+          - php-intl
+          - php-bcmath
+          - php-gmp
+          - php-imagick
+          - php-apcu
+          - php-redis
+          - php-bz2
+          - redis-server
+          - postgresql-client
+          - bzip2
+          - docker.io
+          - cron
+        state: present
+        update_cache: true
+
+    - name: Determine PHP version
+      ansible.builtin.command: php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;'
+      register: php_ver
+      changed_when: false
+
+    - name: Set PHP version fact
+      ansible.builtin.set_fact:
+        php_version: "{{ php_ver.stdout }}"
+
+    # Fail early and clearly if the database is unreachable, the password is
+    # wrong, or pg_hba does not allow this VM.
+    - name: Check database connectivity
+      ansible.builtin.command: >
+        psql -h {{ db_host }} -p {{ db_port }} -U {{ db_user }} -d {{ db_name }}
+        -c 'select 1'
+      environment:
+        PGPASSWORD: "{{ db_password }}"
+        PGCONNECT_TIMEOUT: "10"
+      changed_when: false
+
+    # --- PHP ---------------------------------------------------------------
+    - name: Configure PHP for Nextcloud
+      ansible.builtin.copy:
+        dest: /etc/php/{{ php_version }}/{{ item }}/conf.d/90-nextcloud.ini
+        mode: "0644"
+        content: |
+          ; Managed by ansible/nextcloud.yml
+          memory_limit = 512M
+          upload_max_filesize = 16G
+          post_max_size = 16G
+          max_execution_time = 3600
+          max_input_time = 3600
+          output_buffering = 0
+          apc.enable_cli = 1
+          opcache.enable = 1
+          opcache.interned_strings_buffer = 32
+          opcache.memory_consumption = 256
+          opcache.max_accelerated_files = 10000
+          opcache.revalidate_freq = 60
+          opcache.save_comments = 1
+      loop: [fpm, cli]
+      notify: Restart php-fpm
+
+    # Nextcloud reads system environment variables (PATH, TMP...) which the
+    # stock pool config keeps commented out.
+    - name: Expose environment variables to php-fpm
+      ansible.builtin.lineinfile:
+        path: /etc/php/{{ php_version }}/fpm/pool.d/www.conf
+        regexp: '^;?env\[{{ item }}\]'
+        line: "env[{{ item }}] = {{ lookup('vars', 'fpm_env_' + item) }}"
+      loop: [HOSTNAME, PATH, TMP, TMPDIR, TEMP]
+      vars:
+        fpm_env_HOSTNAME: $HOSTNAME
+        fpm_env_PATH: /usr/local/bin:/usr/bin:/bin
+        fpm_env_TMP: /tmp
+        fpm_env_TMPDIR: /tmp
+        fpm_env_TEMP: /tmp
+      notify: Restart php-fpm
+
+    - name: Size the php-fpm pool
+      ansible.builtin.lineinfile:
+        path: /etc/php/{{ php_version }}/fpm/pool.d/www.conf
+        regexp: '^;?{{ item.key }}\s*='
+        line: "{{ item.key }} = {{ item.value }}"
+      loop:
+        - { key: pm.max_children, value: 8 }
+        - { key: pm.start_servers, value: 2 }
+        - { key: pm.min_spare_servers, value: 2 }
+        - { key: pm.max_spare_servers, value: 4 }
+      notify: Restart php-fpm
+
+    # --- Apache -------------------------------------------------------------
+    - name: Enable Apache modules
+      ansible.builtin.command: a2enmod rewrite headers env dir mime proxy proxy_fcgi setenvif
+      register: a2enmod
+      changed_when: "'Enabling module' in a2enmod.stdout"
+      notify: Reload apache
+
+    - name: Enable php-fpm handler
+      ansible.builtin.command: a2enconf php{{ php_version }}-fpm
+      register: a2enconf
+      changed_when: "'Enabling conf' in a2enconf.stdout"
+      notify: Reload apache
+
+    - name: Disable the default site
+      ansible.builtin.command: a2dissite 000-default
+      register: a2dissite
+      changed_when: "'Site 000-default disabled' in a2dissite.stdout"
+      notify: Reload apache
+
+    # Plain HTTP: TLS ends at the proxy in front of Traefik. This is the only
+    # site, so it also answers requests for the VM's IP (the document server
+    # fetches files that way).
+    - name: Write Nextcloud site
+      ansible.builtin.copy:
+        dest: /etc/apache2/sites-available/nextcloud.conf
+        mode: "0644"
+        content: |
+          # Managed by ansible/nextcloud.yml
+          <VirtualHost *:80>
+            ServerName {{ nextcloud_host }}
+            ServerAlias {{ vm_ip }}
+            DocumentRoot {{ nextcloud_dir }}
+
+            <Directory {{ nextcloud_dir }}/>
+              Require all granted
+              AllowOverride All
+              Options FollowSymLinks MultiViews
+
+              # Nextcloud ships its own WebDAV server (SabreDAV).
+              <IfModule mod_dav.c>
+                Dav off
+              </IfModule>
+            </Directory>
+          </VirtualHost>
+      notify: Reload apache
+
+    - name: Enable Nextcloud site
+      ansible.builtin.command: a2ensite nextcloud
+      register: a2ensite
+      changed_when: "'Enabling site' in a2ensite.stdout"
+      notify: Reload apache
+
+    # --- Nextcloud code -------------------------------------------------------
+    - name: Download Nextcloud
+      ansible.builtin.get_url:
+        url: "{{ nextcloud_tarball }}"
+        dest: /root/nextcloud-{{ nextcloud_version }}.tar.bz2
+        checksum: sha256:{{ nextcloud_tarball }}.sha256
+        mode: "0644"
+
+    - name: Unpack Nextcloud
+      ansible.builtin.unarchive:
+        src: /root/nextcloud-{{ nextcloud_version }}.tar.bz2
+        dest: /var/www
+        remote_src: true
+        creates: "{{ nextcloud_dir }}/version.php"
+      register: unpack
+
+    - name: Own the tree as www-data
+      ansible.builtin.file:
+        path: "{{ nextcloud_dir }}"
+        owner: www-data
+        group: www-data
+        recurse: true
+      when: unpack.changed
+
+    - name: Create data directory
+      ansible.builtin.file:
+        path: "{{ nextcloud_data_dir }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0750"
+
+    # --- managed config -------------------------------------------------------
+    # Nextcloud reads config/*.config.php after config.php and lets them
+    # override it. Keeping our settings there leaves config.php — where the
+    # installer writes instanceid, secret and passwordsalt — untouched.
+    - name: Write object store config (Garage as primary storage)
+      ansible.builtin.copy:
+        dest: "{{ nextcloud_dir }}/config/objectstore.config.php"
+        owner: www-data
+        group: www-data
+        mode: "0640"
+        content: |
+          <?php
+          // Managed by ansible/nextcloud.yml. Must exist before the first
+          // install: switching an instance to object storage later makes its
+          // existing files inaccessible.
+          $CONFIG = [
+            'objectstore' => [
+              'class' => '\\OC\\Files\\ObjectStore\\S3',
+              'arguments' => [
+                'bucket' => '{{ s3_bucket }}',
+                'autocreate' => false,
+                'key' => '{{ s3_access_key }}',
+                'secret' => '{{ s3_secret_key }}',
+                'hostname' => '{{ s3_host }}',
+                'port' => {{ s3_port }},
+                'use_ssl' => false,
+                'region' => '{{ s3_region }}',
+                'use_path_style' => true,
+              ],
+            ],
+          ];
+      no_log: true
+
+    - name: Write server config
+      ansible.builtin.copy:
+        dest: "{{ nextcloud_dir }}/config/nextcloud.config.php"
+        owner: www-data
+        group: www-data
+        mode: "0640"
+        content: |
+          <?php
+          // Managed by ansible/nextcloud.yml; overrides config.php.
+          $CONFIG = [
+            // The VM's IP is how the document server reaches us.
+            'trusted_domains' => {{ [nextcloud_host, vm_ip] | to_json }},
+            // TLS ends at the proxy in front of Traefik.
+            'trusted_proxies' => {{ trusted_proxies | to_json }},
+            'overwriteprotocol' => 'https',
+            'overwritehost' => '{{ nextcloud_host }}',
+            'overwrite.cli.url' => 'https://{{ nextcloud_host }}',
+            'htaccess.RewriteBase' => '/',
+            'memcache.local' => '\\OC\\Memcache\\APCu',
+            'memcache.locking' => '\\OC\\Memcache\\Redis',
+            'redis' => ['host' => '127.0.0.1', 'port' => 6379],
+            'default_phone_region' => 'SE',
+            'maintenance_window_start' => 1,
+            'logfile' => '{{ nextcloud_data_dir }}/nextcloud.log',
+          ];
+
+    # --- install ------------------------------------------------------------------
+    # A previous run backed up config.php (instanceid, secret, passwordsalt);
+    # put it back before deciding whether to install, so a rebuilt VM picks up
+    # the existing database instead of creating a new instance on top of it.
+    - name: Check for a config.php backup
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/nextcloud-config.php"
+      delegate_to: localhost
+      become: false
+      register: config_backup
+
+    - name: Restore config.php from backup
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/nextcloud-config.php"
+        dest: "{{ nextcloud_dir }}/config/config.php"
+        owner: www-data
+        group: www-data
+        mode: "0640"
+        force: false
+      when: config_backup.stat.exists
+
+    - name: Check whether Nextcloud is installed
+      ansible.builtin.command: "{{ occ }} status --output=json"
+      register: nc_status
+      changed_when: false
+      failed_when: false
+
+    - name: Install Nextcloud
+      ansible.builtin.command:
+        argv:
+          - sudo
+          - -u
+          - www-data
+          - php
+          - "{{ nextcloud_dir }}/occ"
+          - maintenance:install
+          - --database=pgsql
+          - --database-host={{ db_host }}
+          - --database-port={{ db_port }}
+          - --database-name={{ db_name }}
+          - --database-user={{ db_user }}
+          - --database-pass={{ db_password }}
+          - --admin-user={{ nextcloud_admin_user }}
+          - --admin-pass={{ nextcloud_admin_password }}
+          - --data-dir={{ nextcloud_data_dir }}
+      when: nc_status.stdout is not search('"installed"\s*:\s*true')
+      no_log: true
+
+    - name: Enable pretty URLs
+      ansible.builtin.command: "{{ occ }} maintenance:update:htaccess"
+      changed_when: false
+
+    - name: Add missing database indices
+      ansible.builtin.command: "{{ occ }} db:add-missing-indices"
+      changed_when: false
+
+    - name: Use cron for background jobs
+      ansible.builtin.command: "{{ occ }} background:cron"
+      changed_when: false
+
+    - name: Schedule background jobs
+      ansible.builtin.cron:
+        name: nextcloud
+        user: www-data
+        minute: "*/5"
+        job: php -f {{ nextcloud_dir }}/cron.php
+
+    # --- Euro-Office document server ------------------------------------------------
+    - name: Create Euro-Office config directory
+      ansible.builtin.file:
+        path: /etc/euro-office
+        state: directory
+        mode: "0750"
+
+    # Shared secret between Nextcloud and the document server: generated once
+    # on the VM, never in the repo.
+    - name: Generate JWT secret
+      ansible.builtin.shell: umask 077 && openssl rand -hex 32 > /etc/euro-office/jwt-secret
+      args:
+        creates: /etc/euro-office/jwt-secret
+
+    - name: Read JWT secret
+      ansible.builtin.slurp:
+        src: /etc/euro-office/jwt-secret
+      register: jwt_secret_file
+      no_log: true
+
+    - name: Set JWT secret fact
+      ansible.builtin.set_fact:
+        eods_jwt_secret: "{{ jwt_secret_file.content | b64decode | trim }}"
+      no_log: true
+
+    # ALLOW_PRIVATE_IP_ADDRESS: the server fetches documents from Nextcloud
+    # on the VM's LAN address, which it refuses by default.
+    - name: Write Euro-Office environment
+      ansible.builtin.copy:
+        dest: /etc/euro-office/env
+        mode: "0600"
+        content: |
+          JWT_ENABLED=true
+          JWT_SECRET={{ eods_jwt_secret }}
+          ALLOW_PRIVATE_IP_ADDRESS=true
+      no_log: true
+      notify: Restart euro-office
+
+    - name: Pull Euro-Office image
+      ansible.builtin.command: docker pull {{ eods_image }}
+      register: pull
+      changed_when: "'Downloaded newer image' in pull.stdout"
+      notify: Restart euro-office
+
+    # Plain docker run under systemd: no compose, no extra Ansible
+    # collections. --rm plus the ExecStartPre keep restarts clean.
+    #
+    # State goes to named volumes (/var/lib/docker/volumes), not bind mounts.
+    # The services inside run unprivileged and expect the directories the
+    # image ships, with their ownership and subdirectories; an empty
+    # root-owned bind mount hides those and the converter dies with EACCES,
+    # supervisord with a missing log directory. Docker seeds a new named
+    # volume from the image instead. Logs: `docker exec euro-office tail -f
+    # /var/log/euro-office/documentserver/docservice/out.log`.
+    - name: Write Euro-Office service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/euro-office.service
+        mode: "0644"
+        content: |
+          # Managed by ansible/nextcloud.yml
+          [Unit]
+          Description=Euro-Office document server (Docker)
+          Documentation=https://euro-office.github.io/documentation/
+          After=docker.service network-online.target
+          Requires=docker.service
+
+          [Service]
+          ExecStartPre=-/usr/bin/docker rm -f euro-office
+          ExecStart=/usr/bin/docker run --rm --name euro-office \
+            --env-file /etc/euro-office/env \
+            -p {{ eods_port }}:80 \
+            -v euro-office-data:/var/lib/euro-office/documentserver \
+            -v euro-office-private:/var/www/euro-office/Data \
+            -v euro-office-logs:/var/log/euro-office/documentserver \
+            {{ eods_image }}
+          ExecStop=/usr/bin/docker stop euro-office
+          Restart=always
+          RestartSec=10
+          TimeoutStartSec=0
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart euro-office
+
+    # Apply pending restarts now (unit/env/image changed) rather than at the
+    # end of the play, so the health check below sees the new container.
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Start Euro-Office
+      ansible.builtin.systemd:
+        name: euro-office
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    # First start unpacks fonts and warms up; give it a few minutes.
+    - name: Wait for Euro-Office to become healthy
+      ansible.builtin.uri:
+        url: http://127.0.0.1:{{ eods_port }}/healthcheck
+        return_content: true
+      register: eods_health
+      until: eods_health.status == 200 and eods_health.content | trim == 'true'
+      retries: 60
+      delay: 5
+
+    # --- connector app ---------------------------------------------------------------
+    - name: Install Euro-Office connector app
+      ansible.builtin.command: "{{ occ }} app:install eurooffice"
+      args:
+        creates: "{{ nextcloud_dir }}/apps/eurooffice"
+
+    - name: Read connector settings
+      ansible.builtin.command: "{{ occ }} config:app:get eurooffice {{ item.key }}"
+      loop: "{{ eods_settings | dict2items }}"
+      register: eods_current
+      changed_when: false
+      failed_when: false
+      no_log: true
+      vars:
+        eods_settings:
+          DocumentServerUrl: https://{{ eods_host }}/
+          DocumentServerInternalUrl: http://127.0.0.1:{{ eods_port }}/
+          StorageUrl: http://{{ vm_ip }}/
+          jwt_secret: "{{ eods_jwt_secret }}"
+
+    - name: Write connector settings
+      ansible.builtin.command: >
+        {{ occ }} config:app:set eurooffice {{ item.item.key }}
+        --value={{ item.item.value | quote }}
+      loop: "{{ eods_current.results }}"
+      when: item.stdout != item.item.value
+      no_log: true
+
+    - name: Check the connection between Nextcloud and Euro-Office
+      ansible.builtin.command: "{{ occ }} eurooffice:documentserver --check"
+      changed_when: false
+
+    # --- backup ------------------------------------------------------------------------
+    # config.php carries the instance secret and password salt: without it a
+    # rebuilt VM cannot use the existing database. Gitignored, keep it safe.
+    - name: Back up config.php
+      ansible.builtin.fetch:
+        src: "{{ nextcloud_dir }}/config/config.php"
+        dest: "{{ playbook_dir }}/nextcloud-config.php"
+        flat: true
+
+    - name: How to log in
+      ansible.builtin.debug:
+        msg: >-
+          Nextcloud is at https://{{ nextcloud_host }}/ (user
+          {{ nextcloud_admin_user }}), Euro-Office at https://{{ eods_host }}/.
+          Both need the k8s/nextcloud manifest deployed and DNS pointing at
+          the proxy.

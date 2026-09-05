@@ -2,7 +2,7 @@
 
 Proxmox + OpenTofu + Ansible homelab running a kubeadm Kubernetes cluster
 (Calico CNI) with MetalLB, Traefik, Argo CD and sealed-secrets, plus a
-separate Garage VM for S3-compatible object storage.
+separate Garage VM for S3-compatible object storage and a Nextcloud VM.
 
 | What              | Where                                    |
 | ----------------- | ---------------------------------------- |
@@ -11,6 +11,7 @@ separate Garage VM for S3-compatible object storage.
 | MetalLB pool      | 10.130.0.50-54                           |
 | Garage (S3) VM    | 10.130.0.20 (VM 3010), `storage/` root   |
 | S3 endpoint       | http://10.130.0.20:3900, region `garage` |
+| Nextcloud VM      | 10.130.0.25 (VM 3015), `nextcloud/` root |
 
 Argo CD deploys everything under `k8s/` in this repo automatically —
 pushing to master is deploying.
@@ -179,6 +180,65 @@ Backups: `protection=true` prevents deletion, it does not protect the data.
 Add the VM to a vzdump/PBS schedule. `metadata_fsync = true` keeps the
 metadata database consistent under crash-style snapshots, and Garage takes
 its own metadata snapshots every 6 hours under `/var/lib/garage/meta/snapshots`.
+
+## Nextcloud + Euro-Office
+
+A VM of its own (`nextcloud/` root, guarded like Garage) running Nextcloud
+from the upstream tarball and the Euro-Office document server in Docker.
+Files live in Garage (S3 primary storage), the database on the external
+PostgreSQL server at 10.130.0.10, so the VM holds only code, config and
+caches. Traefik routes `nextcloud.dennisek.se` and `eods.dennisek.se` to it
+via `k8s/nextcloud/nextcloud.yaml`.
+
+Prepare, once:
+
+```sh
+# 1. Bucket and key, as root on the Garage VM (see "Object storage")
+garage bucket create nextcloud
+garage key create nextcloud-key
+garage bucket allow --read --write --owner nextcloud --key nextcloud-key
+
+# 2. Database and role on the PostgreSQL server, plus a pg_hba.conf rule
+#    that lets 10.130.0.25 connect to it
+CREATE USER nextcloud WITH PASSWORD '...';
+CREATE DATABASE nextcloud OWNER nextcloud ENCODING 'UTF8' TEMPLATE template0;
+
+# 3. Secrets for the playbook
+cp ansible/nextcloud-secrets.example.yml ansible/nextcloud-secrets.yml
+$EDITOR ansible/nextcloud-secrets.yml
+```
+
+Deploy:
+
+```sh
+cd nextcloud
+ln -s ../terraform.tfvars .   # reuse the credentials
+tofu init && tofu plan && tofu apply   # also writes ansible/nextcloud-inventory.ini
+
+cd ../ansible && ansible-playbook -i nextcloud-inventory.ini nextcloud.yml
+# commit + push k8s/nextcloud/ — Argo CD deploys the Ingresses
+```
+
+Point DNS for both hostnames at the proxy in front of Traefik, like the other
+`*.dennisek.se` names. The proxy should also send the HSTS header, or
+Nextcloud's admin overview will nag about it.
+
+The Euro-Office JWT secret is generated on the VM at first run
+(`/etc/euro-office/jwt-secret`) and only ever shared with Nextcloud, so
+nobody else can open or convert documents through `eods.dennisek.se`.
+Its state and logs live in the `euro-office-*` Docker volumes (bind mounts
+break the unprivileged services inside the image). Logs:
+`sudo docker exec euro-office tail -f /var/log/euro-office/documentserver/docservice/out.log`.
+
+The playbook fetches `config/config.php` to `ansible/nextcloud-config.php`
+(gitignored — keep it safe): it holds the instance secret and password salt,
+and is restored first when the playbook runs against a rebuilt VM, so the
+existing database keeps working.
+
+Upgrading: Euro-Office — bump `eods_image` in `ansible/nextcloud.yml` and
+re-run the playbook. Nextcloud — the playbook installs but does not upgrade;
+use the built-in updater or `occ upgrade` on the VM, then bump
+`nextcloud_version` so a rebuild installs the same version.
 
 ## Tearing down
 
