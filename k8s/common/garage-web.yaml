@@ -1,0 +1,27 @@
+# Garage's web endpoint (anonymous read-only HTTP for buckets with
+# `garage bucket website --allow`, port 3902 on the Garage VM) as a cluster
+# Service, so any app can publish a bucket by adding an Ingress rule that
+# points its hostname at this Service. Garage picks the bucket from the Host
+# header, which Traefik passes through unchanged, so the bucket must be
+# aliased to that hostname. See README "Public files".
+#
+# A selector-less Service with a hand-written EndpointSlice is how an
+# Ingress can target something outside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage-web
+spec:
+  ports: [{ name: http, port: 80, targetPort: 3902 }]
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: garage-web
+  labels:
+    kubernetes.io/service-name: garage-web
+addressType: IPv4
+ports:
+  - { name: http, port: 3902, protocol: TCP }
+endpoints:
+  - addresses: ["10.130.0.20"]

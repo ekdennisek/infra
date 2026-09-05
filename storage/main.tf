@@ -188,6 +188,13 @@ resource "proxmox_virtual_environment_file" "garage_vendor_data" {
             # path-style against http://${local.garage_ip}:3900.
             root_domain   = ".s3.lab.local"
 
+            # Anonymous HTTP for buckets with `garage bucket website --allow`,
+            # bucket chosen by the Host header. Traefik fronts it per app
+            # (k8s/common/garage-web.yaml).
+            [s3_web]
+            bind_addr   = "[::]:3902"
+            root_domain = ".web.lab.local"
+
             [admin]
             api_bind_addr = "[::]:3903"
             admin_token   = "__ADMIN_TOKEN__"

@@ -4,13 +4,13 @@ Proxmox + OpenTofu + Ansible homelab running a kubeadm Kubernetes cluster
 (Calico CNI) with MetalLB, Traefik, Argo CD and sealed-secrets, plus a
 separate Garage VM for S3-compatible object storage.
 
-| What                | Where                                   |
-| ------------------- | --------------------------------------- |
-| k8s control plane   | 10.130.0.30 (VM 3020)                   |
-| k8s workers         | 10.130.0.40-41 (VM 3021-3022)           |
-| MetalLB pool        | 10.130.0.50-54                          |
-| Garage (S3) VM      | 10.130.0.20 (VM 3010), `storage/` root  |
-| S3 endpoint         | http://10.130.0.20:3900, region `garage` |
+| What              | Where                                    |
+| ----------------- | ---------------------------------------- |
+| k8s control plane | 10.130.0.30 (VM 3020)                    |
+| k8s workers       | 10.130.0.40-41 (VM 3021-3022)            |
+| MetalLB pool      | 10.130.0.50-54                           |
+| Garage (S3) VM    | 10.130.0.20 (VM 3010), `storage/` root   |
+| S3 endpoint       | http://10.130.0.20:3900, region `garage` |
 
 Argo CD deploys everything under `k8s/` in this repo automatically —
 pushing to master is deploying.
@@ -149,6 +149,24 @@ Test from a workstation with the AWS CLI:
 
 ```sh
 aws --endpoint-url http://10.130.0.20:3900 --region garage s3 ls s3://myapp/
+```
+
+### Public files (\*.static.dennisek.se)
+
+Anything that must be reachable by browsers goes in a bucket of its own,
+served anonymously by Garage's web endpoint. `k8s/common/garage-web.yaml`
+exposes that endpoint as a Service; each app adds an Ingress rule in its own
+manifest that points its hostname (`<app>.static.dennisek.se`) at it. Garage
+picks the bucket by the Host header, so alias the bucket to the hostname.
+Whatever the app uses to build its public links must be that hostname.
+
+```sh
+# Bucket and key, as root on the Garage VM
+garage bucket create myapp
+garage key create myapp-key      # prints Key ID and Secret key — copy them now
+garage bucket allow --read --write --owner myapp --key myapp-key
+garage bucket alias myapp myapp.static.dennisek.se   # Host header -> bucket
+garage bucket website --allow myapp                  # anonymous GET on :3902
 ```
 
 Upgrading: cloud-init only runs at first boot, so bumping `garage_version`
