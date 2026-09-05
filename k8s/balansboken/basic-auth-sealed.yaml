@@ -1,0 +1,13 @@
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: balansboken-basic-auth
+  namespace: default
+spec:
+  encryptedData:
+    users: AgADY/56QRgHoZMpKEnUkiR7dnCWK1XWxRtbvVOoBVE+gsZPXkeQjJ8bo7VXiQM5L3xNLT1A2ChTDaCFiOrZE0vHxu7J4U0rZMhSUZNp+o68+KYLBerm7pdKaz1HuKNpTwFo1PPB/3VK9I58mKcwzQ1cpO/cjBzl/B8rRZ4G21iVMXXkfeyOyaZo3QCI1pzAn3M3kyxKWr2JufVIOFPgf0XADcd9kKax4klaCxrm0CQZe4tG7jceGO2wO4lzaDOEKx0gb4qd6g0+a7E1/qgffGPDQm4wWvdJvTb/mJBjxqL5/OPBvmKn6vUpA4btuZPqAOuOQsu4OSkz5JIKT39tWKbthEGEeThu+n2qOmjojG9UvavX3TPc/1ie3NiEXXOCzVPImxUzNFjC6/ZnsJkCXsfdPTaquzNNUim8bZolVe8cuh1/72I26ybUhLct7fjQqemCOJJQ7AOSEw7ScjWWwItlqSfS5JuMp7UUakrAxKiJFFngkU4mQ4E9M67YETcPRgydkIkpf+imfZpDkpH0evRWUUpQbRjFMDVx1vMIBPHM+7KRVA2A7BffNiGD/u/Oe4X5TaHTm8Atszm8+hX2CNWkPRUFNP3hM0Dzs5aUj1V1NiSyh7YKWD6XWTyae5u0awd2fF0NVTuiXJN38Y65vD/CQVT5e/EL95MAf190WFVgbmT337+7HKI9etpRzqs3+bexTN8QUruu7v3l8B2OrEbUJVCiFS5RFqm1hJPzEBjTPzreJ1CyLWzykSEkoAst/lRyvRE/FYVnKaLAAYmuNMcCZUJBcPc=
+  template:
+    metadata:
+      name: balansboken-basic-auth
+      namespace: default
