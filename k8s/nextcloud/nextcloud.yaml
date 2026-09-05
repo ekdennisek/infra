@@ -65,10 +65,26 @@ endpoints:
   - addresses: ["10.130.0.25"]
     conditions: { ready: true }
 ---
+# Traefik receives plain HTTP from the proxy that terminates TLS and tells
+# the backend so via X-Forwarded-Proto: http. The document server builds
+# the URLs the editor downloads the converted document from out of that
+# header, so it hands an https page an http:// URL, the browser blocks it as
+# mixed content and the editor reports "Download failed". Same fix as blog.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: eods-https
+spec:
+  headers:
+    customRequestHeaders:
+      X-Forwarded-Proto: https
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: eods
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: default-eods-https@kubernetescrd
 spec:
   ingressClassName: traefik
   rules:
