@@ -54,10 +54,25 @@ spec:
   selector: { app: blog }
   ports: [{ port: 80, targetPort: 2368 }]
 ---
+# TLS ends at the proxy in front of Traefik, which then sees plain HTTP and
+# tells Ghost so via X-Forwarded-Proto. Ghost's url is https, so it answers
+# every request with a 301 to https: a redirect loop. Override the header so
+# Ghost knows the client is already on https. The proxy handles http->https.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: blog-https
+spec:
+  headers:
+    customRequestHeaders:
+      X-Forwarded-Proto: https
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: blog
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: default-blog-https@kubernetescrd
 spec:
   ingressClassName: traefik
   rules:

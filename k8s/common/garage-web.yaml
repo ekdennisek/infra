@@ -25,3 +25,6 @@ ports:
   - { name: http, port: 3902, protocol: TCP }
 endpoints:
   - addresses: ["10.130.0.20"]
+    # Explicit so the manifest matches what the API server stores; without
+    # it Argo CD reports the slice permanently OutOfSync.
+    conditions: { ready: true }
