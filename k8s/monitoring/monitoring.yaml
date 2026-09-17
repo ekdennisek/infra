@@ -1,0 +1,46 @@
+# Grafana runs on a VM outside the cluster (monitoring/main.tf,
+# ansible/monitoring.yml). A selector-less Service with a hand-written
+# EndpointSlice lets Traefik route the public hostname to it — same trick as
+# k8s/nextcloud/nextcloud.yaml. TLS ends at the proxy in front of Traefik;
+# Grafana knows its public URL via root_url.
+#
+# Only Grafana (port 3000) is published. Prometheus on the same VM has no
+# authentication and stays on the LAN.
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+spec:
+  ports: [{ name: http, port: 80, targetPort: 3000 }]
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: grafana
+  labels:
+    kubernetes.io/service-name: grafana
+addressType: IPv4
+ports:
+  - { name: http, port: 3000, protocol: TCP }
+endpoints:
+  - addresses: ["10.130.0.15"]
+    # Explicit so the manifest matches what the API server stores; without
+    # it Argo CD reports the slice permanently OutOfSync.
+    conditions: { ready: true }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: monitoring.dennisek.se
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port: { number: 80 }

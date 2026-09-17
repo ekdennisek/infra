@@ -2,16 +2,20 @@
 
 Proxmox + OpenTofu + Ansible homelab running a kubeadm Kubernetes cluster
 (Calico CNI) with MetalLB, Traefik, Argo CD and sealed-secrets, plus a
-separate Garage VM for S3-compatible object storage and a Nextcloud VM.
+separate Garage VM for S3-compatible object storage, a Nextcloud VM and a
+monitoring VM (Prometheus + Grafana).
 
-| What              | Where                                    |
-| ----------------- | ---------------------------------------- |
-| k8s control plane | 10.130.0.30 (VM 3020)                    |
-| k8s workers       | 10.130.0.40-41 (VM 3021-3022)            |
-| MetalLB pool      | 10.130.0.50-54                           |
-| Garage (S3) VM    | 10.130.0.20 (VM 3010), `storage/` root   |
-| S3 endpoint       | http://10.130.0.20:3900, region `garage` |
-| Nextcloud VM      | 10.130.0.25 (VM 3015), `nextcloud/` root |
+| What              | Where                                       |
+| ----------------- | ------------------------------------------- |
+| k8s control plane | 10.130.0.30 (VM 3020)                       |
+| k8s workers       | 10.130.0.40-41 (VM 3021-3022)               |
+| MetalLB pool      | 10.130.0.50-54                              |
+| Garage (S3) VM    | 10.130.0.20 (VM 3010), `storage/` root      |
+| S3 endpoint       | http://10.130.0.20:3900, region `garage`    |
+| Nextcloud VM      | 10.130.0.25 (VM 3015), `nextcloud/` root    |
+| Monitoring VM     | 10.130.0.15 (VM 3005), `monitoring/` root   |
+| Grafana           | https://monitoring.dennisek.se              |
+| Prometheus        | http://10.130.0.15:9090 (LAN only, no auth) |
 
 Argo CD deploys everything under `k8s/` in this repo automatically —
 pushing to master is deploying.
@@ -239,6 +243,65 @@ Upgrading: Euro-Office — bump `eods_image` in `ansible/nextcloud.yml` and
 re-run the playbook. Nextcloud — the playbook installs but does not upgrade;
 use the built-in updater or `occ upgrade` on the VM, then bump
 `nextcloud_version` so a rebuild installs the same version.
+
+## Monitoring (Prometheus + Grafana)
+
+A VM of its own (`monitoring/` root) so it keeps running, and keeps its
+history, while the cluster is rebuilt. Prometheus comes from the upstream
+release tarball, Grafana from Grafana's apt repository. Prometheus pulls:
+every target runs an exporter and the VM scrapes it.
+
+```sh
+cd monitoring
+ln -s ../terraform.tfvars .   # reuse the credentials
+tofu init && tofu plan && tofu apply   # also writes ansible/monitoring-inventory.ini
+
+cd ../ansible && ansible-playbook -i monitoring-inventory.ini monitoring.yml
+# commit + push k8s/monitoring/ — Argo CD deploys the Ingress
+```
+
+Traefik routes `monitoring.dennisek.se` to Grafana on the VM via
+`k8s/monitoring/monitoring.yaml`; point DNS for it at the proxy in front of
+Traefik, like the other `*.dennisek.se` names. Grafana's own login is the
+only thing between the internet and the dashboards. Its session cookie is
+HTTPS-only, so log in through the hostname, not http://10.130.0.15:3000.
+Prometheus is not published and must not be: it has no authentication.
+
+Log in to Grafana as `admin`; the password is generated on the VM at first
+run: `sudo cat /etc/grafana/admin-password`. It is only read when Grafana
+creates its database, so changing it later in the UI does not update the file.
+
+Scrape targets live in the `Write Prometheus config` task of
+`ansible/monitoring.yml`; add a job there and re-run the playbook (a config
+change is a reload, not a restart). http://10.130.0.15:9090/targets shows
+whether each one answers.
+
+| Job          | Target          | What                                  |
+| ------------ | --------------- | ------------------------------------- |
+| `prometheus` | localhost:9090  | Prometheus itself                     |
+| `node`       | localhost:9100  | the monitoring VM (disk, memory)      |
+| `compute`    | 10.130.0.5:9100 | compute server, including its AMD GPU |
+
+The playbook does not touch the compute server. It needs a `node_exporter`
+on port 9100, reachable from 10.130.0.15, started with `--collector.drm`:
+that collector is off by default and is what provides GPU utilisation and
+VRAM (`node_drm_*`, read from the `amdgpu` driver's sysfs files, no ROCm
+needed). Temperatures, power and fan speed come from the `hwmon` collector,
+which is on by default. Until it answers, the `compute` target is simply
+down and the GPU dashboard empty.
+
+Dashboards under `ansible/monitoring-dashboards/` are provisioned into
+Grafana and read-only there: edit a copy in the UI, export its JSON, commit
+it and re-run the playbook. `compute-gpu.json` is the GPU board; for the
+hosts themselves import "Node Exporter Full" (ID 1860) in the UI.
+
+The VM is not guarded against `tofu destroy`: losing it loses metric
+history and dashboards made in the UI, nothing else. Retention is one year
+or 25 GB, whichever comes first (`prom_retention_*` in the playbook).
+
+Upgrading: Prometheus — bump `prom_version` in `ansible/monitoring.yml` and
+re-run the playbook. Grafana — `sudo apt update && sudo apt upgrade` on the
+VM; if dpkg asks about `grafana.ini`, keep the installed one.
 
 ## Tearing down
 

@@ -1,0 +1,385 @@
+---
+# Installs Prometheus (upstream release tarball) and Grafana (Grafana's apt
+# repository) on the VM created by monitoring/main.tf, points Grafana at
+# Prometheus and provisions the dashboards in monitoring-dashboards/.
+#
+#   ansible-playbook -i monitoring-inventory.ini monitoring.yml
+#
+# No secrets file: the Grafana admin password is generated on the VM at first
+# run. Safe to re-run: every step is guarded, so a second run changes nothing.
+#
+# This playbook only touches the monitoring VM. Whatever it scrapes (the
+# compute server, see compute_target) has to run its own exporter — README.
+
+- name: Wait for provisioning to finish
+  hosts: monitoring
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 600
+
+    - name: Wait for cloud-init to complete
+      ansible.builtin.command: cloud-init status --wait
+      register: cloud_init
+      changed_when: false
+      failed_when: cloud_init.rc not in [0, 2]
+
+- name: Install Prometheus and Grafana
+  hosts: monitoring
+  become: true
+  vars:
+    # 3.13 is the LTS line (supported until 2027-07-31). Bump and re-run to
+    # upgrade; the checksum comes from the release's sha256sums.txt.
+    prom_version: 3.13.3
+    prom_release: https://github.com/prometheus/prometheus/releases/download/v{{ prom_version }}
+    prom_dist: prometheus-{{ prom_version }}.linux-amd64
+    prom_data_dir: /var/lib/prometheus
+    # Whichever limit is hit first wins. The size cap keeps the TSDB well
+    # inside the VM's 40 GB disk (monitoring/main.tf).
+    prom_retention_time: 1y
+    prom_retention_size: 25GB
+    prom_scrape_interval: 15s
+    # The compute server's node_exporter. Not installed by this playbook.
+    compute_target: 10.130.0.5:9100
+    # Where browsers reach Grafana: through Traefik, which routes the
+    # hostname to this VM's port 3000 (k8s/monitoring/monitoring.yaml).
+    grafana_host: monitoring.dennisek.se
+    grafana_root_url: https://{{ grafana_host }}/
+
+  handlers:
+    # Reload before restart: if one run notifies both, the restart comes
+    # last and nothing signals a process that is still starting up.
+    - name: Reload prometheus
+      ansible.builtin.systemd:
+        name: prometheus
+        state: reloaded
+
+    - name: Restart prometheus
+      ansible.builtin.systemd:
+        name: prometheus
+        state: restarted
+        daemon_reload: true
+
+    - name: Restart grafana
+      ansible.builtin.systemd:
+        name: grafana-server
+        state: restarted
+
+  tasks:
+    # --- Prometheus ------------------------------------------------------------
+    # Created before any package is installed: Ubuntu's node exporter package
+    # runs as a user of the same name and home, and reuses this one.
+    - name: Create prometheus user
+      ansible.builtin.user:
+        name: prometheus
+        system: true
+        home: "{{ prom_data_dir }}"
+        create_home: false
+        shell: /usr/sbin/nologin
+
+    # The VM's own metrics (a TSDB box dies by filling its disk). Without the
+    # recommended collector scripts, which drag in smartmontools and friends.
+    - name: Install node exporter
+      ansible.builtin.apt:
+        name: prometheus-node-exporter
+        state: present
+        install_recommends: false
+        update_cache: true
+
+    - name: Create Prometheus directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: prometheus
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /etc/prometheus, owner: root, mode: "0755" }
+        - { path: "{{ prom_data_dir }}", owner: prometheus, mode: "0755" }
+
+    - name: Download Prometheus
+      ansible.builtin.get_url:
+        url: "{{ prom_release }}/{{ prom_dist }}.tar.gz"
+        dest: /root/{{ prom_dist }}.tar.gz
+        checksum: sha256:{{ prom_release }}/sha256sums.txt
+        mode: "0644"
+
+    - name: Unpack Prometheus
+      ansible.builtin.unarchive:
+        src: /root/{{ prom_dist }}.tar.gz
+        dest: /opt
+        remote_src: true
+        creates: /opt/{{ prom_dist }}/prometheus
+
+    # Copied rather than symlinked so a version bump shows up as a change
+    # and restarts the service.
+    - name: Install Prometheus binaries
+      ansible.builtin.copy:
+        src: /opt/{{ prom_dist }}/{{ item }}
+        dest: /usr/local/bin/{{ item }}
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      loop: [prometheus, promtool]
+      notify: Restart prometheus
+
+    # The instance labels replace host:port with something readable in
+    # dashboards. A target that is down is not an error here: it shows up as
+    # up == 0 on http://<vm>:9090/targets until its exporter answers.
+    - name: Write Prometheus config
+      ansible.builtin.copy:
+        dest: /etc/prometheus/prometheus.yml
+        owner: root
+        group: prometheus
+        mode: "0644"
+        validate: /usr/local/bin/promtool check config %s
+        content: |
+          # Managed by ansible/monitoring.yml
+          global:
+            scrape_interval: {{ prom_scrape_interval }}
+
+          scrape_configs:
+            - job_name: prometheus
+              static_configs:
+                - targets: ["localhost:9090"]
+                  labels: { instance: {{ inventory_hostname }} }
+
+            # This VM.
+            - job_name: node
+              static_configs:
+                - targets: ["localhost:9100"]
+                  labels: { instance: {{ inventory_hostname }} }
+
+            # The compute server (AMD GPU). Its node_exporter needs
+            # --collector.drm for the node_drm_* GPU metrics.
+            - job_name: compute
+              static_configs:
+                - targets: ["{{ compute_target }}"]
+                  labels: { instance: compute }
+      notify: Reload prometheus
+
+    # Listens on the LAN, not just localhost, for the /targets and /graph
+    # pages. Prometheus has no authentication: never route it publicly.
+    - name: Write Prometheus service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/prometheus.service
+        mode: "0644"
+        content: |
+          # Managed by ansible/monitoring.yml
+          [Unit]
+          Description=Prometheus
+          Documentation=https://prometheus.io/docs/
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          User=prometheus
+          Group=prometheus
+          ExecStart=/usr/local/bin/prometheus \
+            --config.file=/etc/prometheus/prometheus.yml \
+            --storage.tsdb.path={{ prom_data_dir }}/tsdb \
+            --storage.tsdb.retention.time={{ prom_retention_time }} \
+            --storage.tsdb.retention.size={{ prom_retention_size }} \
+            --web.listen-address=0.0.0.0:9090
+          ExecReload=/bin/kill -HUP $MAINPID
+          Restart=always
+          RestartSec=5
+          LimitNOFILE=65536
+          # Hardening: read-only system, writable only where it needs to be.
+          ProtectSystem=strict
+          ProtectHome=true
+          PrivateTmp=true
+          NoNewPrivileges=true
+          ReadWritePaths={{ prom_data_dir }}
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart prometheus
+
+    - name: Start Prometheus
+      ansible.builtin.systemd:
+        name: prometheus
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    # --- Grafana ---------------------------------------------------------------
+    # Not in Ubuntu's archive. Installed once; later upgrades are a plain
+    # `apt upgrade` on the VM.
+    - name: Create apt keyring directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Fetch Grafana apt key
+      ansible.builtin.get_url:
+        url: https://apt.grafana.com/gpg.key
+        dest: /etc/apt/keyrings/grafana.asc
+        mode: "0644"
+
+    - name: Add Grafana apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/grafana.sources
+        mode: "0644"
+        content: |
+          # Managed by ansible/monitoring.yml
+          Types: deb
+          URIs: https://apt.grafana.com
+          Suites: stable
+          Components: main
+          Signed-By: /etc/apt/keyrings/grafana.asc
+      register: grafana_repo
+
+    - name: Install Grafana
+      ansible.builtin.apt:
+        name: grafana
+        state: present
+        update_cache: "{{ grafana_repo.changed }}"
+
+    # Generated once on the VM, never in the repo. Hex, so nothing in it
+    # needs quoting in grafana.ini.
+    - name: Generate Grafana admin password
+      ansible.builtin.shell: umask 077 && openssl rand -hex 24 > /etc/grafana/admin-password
+      args:
+        creates: /etc/grafana/admin-password
+
+    - name: Let Grafana read the admin password
+      ansible.builtin.file:
+        path: /etc/grafana/admin-password
+        owner: root
+        group: grafana
+        mode: "0640"
+
+    # Replaces the package's all-comments grafana.ini; anything not listed
+    # keeps its built-in default. It is a dpkg conffile, so an upgrade that
+    # ships a new one asks which to keep: keep this one.
+    #
+    # admin_password is only read when Grafana creates its database. Changing
+    # the password later (UI or `grafana cli admin reset-admin-password`)
+    # does not update the file.
+    #
+    # TLS ends at the proxy in front of Traefik, so Grafana itself speaks
+    # plain HTTP; root_url is what makes its links and redirects https.
+    # cookie_secure keeps the session cookie off plain HTTP, which also means
+    # logging in via http://<vm>:3000 no longer works: use the hostname.
+    - name: Write Grafana config
+      ansible.builtin.copy:
+        dest: /etc/grafana/grafana.ini
+        owner: root
+        group: grafana
+        mode: "0640"
+        content: |
+          # Managed by ansible/monitoring.yml
+          [server]
+          http_port = 3000
+          domain = {{ grafana_host }}
+          root_url = {{ grafana_root_url }}
+
+          [security]
+          admin_user = admin
+          admin_password = $__file{/etc/grafana/admin-password}
+          cookie_secure = true
+
+          [users]
+          allow_sign_up = false
+
+          [analytics]
+          reporting_enabled = false
+          check_for_updates = false
+          check_for_plugin_updates = false
+      notify: Restart grafana
+
+    # Fixed uid so the dashboard JSON can refer to the datasource.
+    - name: Provision the Prometheus datasource
+      ansible.builtin.copy:
+        dest: /etc/grafana/provisioning/datasources/prometheus.yaml
+        owner: root
+        group: grafana
+        mode: "0640"
+        content: |
+          # Managed by ansible/monitoring.yml
+          apiVersion: 1
+          datasources:
+            - name: Prometheus
+              uid: prometheus
+              type: prometheus
+              access: proxy
+              url: http://localhost:9090
+              isDefault: true
+              editable: false
+              jsonData:
+                timeInterval: {{ prom_scrape_interval }}
+      notify: Restart grafana
+
+    # Dashboards from this repo are read-only in the UI: edit there, export
+    # the JSON, commit it to monitoring-dashboards/ and re-run. Dashboards
+    # created in the UI are separate and live only in Grafana's database.
+    - name: Provision the dashboard provider
+      ansible.builtin.copy:
+        dest: /etc/grafana/provisioning/dashboards/repo.yaml
+        owner: root
+        group: grafana
+        mode: "0640"
+        content: |
+          # Managed by ansible/monitoring.yml
+          apiVersion: 1
+          providers:
+            - name: repo
+              type: file
+              allowUiUpdates: false
+              updateIntervalSeconds: 30
+              options:
+                path: /etc/grafana/dashboards
+      notify: Restart grafana
+
+    # Grafana rescans the directory itself; no restart for a changed file.
+    - name: Copy dashboards
+      ansible.builtin.copy:
+        src: monitoring-dashboards/
+        dest: /etc/grafana/dashboards/
+        owner: root
+        group: grafana
+        mode: "0640"
+        directory_mode: "0750"
+
+    # Apply pending restarts now rather than at the end of the play, so the
+    # health checks below see the final configuration.
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Start Grafana
+      ansible.builtin.systemd:
+        name: grafana-server
+        enabled: true
+        state: started
+
+    # --- checks -------------------------------------------------------------------
+    - name: Wait for Prometheus to become ready
+      ansible.builtin.uri:
+        url: http://127.0.0.1:9090/-/ready
+      register: prom_ready
+      until: prom_ready.status == 200
+      retries: 30
+      delay: 2
+
+    # First start runs the database migrations; give it a minute.
+    - name: Wait for Grafana to become healthy
+      ansible.builtin.uri:
+        url: http://127.0.0.1:3000/api/health
+      register: grafana_health
+      until: grafana_health.status == 200 and grafana_health.json.database == 'ok'
+      retries: 30
+      delay: 2
+
+    - name: How to log in
+      ansible.builtin.debug:
+        msg: >-
+          Grafana is at {{ grafana_root_url }} (user admin, password:
+          `sudo cat /etc/grafana/admin-password` on the VM); it needs the
+          k8s/monitoring manifest deployed and DNS pointing at the proxy.
+          Scrape targets and their state:
+          http://{{ ansible_host }}:9090/targets
